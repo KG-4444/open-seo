@@ -1,0 +1,67 @@
+name: OYAI publish tagged Docker image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Fork tag to build and publish
+        required: true
+        default: v0.0.28-oyai.1
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    if: github.repository == 'KG-4444/open-seo'
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_TAG: ${{ inputs.source_tag }}
+      IMAGE: ghcr.io/kg-4444/open-seo
+    steps:
+      - name: Validate fork tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${SOURCE_TAG}" =~ ^v0\.0\.28-oyai\.[1-9][0-9]*$ ]]; then
+            echo "source_tag must match v0.0.28-oyai.N" >&2
+            exit 2
+          fi
+
+      - name: Check out immutable fork tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_tag }}
+          fetch-depth: 1
+
+      - name: Resolve source identity
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.selfhost
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ inputs.source_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/KG-4444/open-seo
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.version=${{ inputs.source_tag }}
+          provenance: mode=max
+          sbom: true
