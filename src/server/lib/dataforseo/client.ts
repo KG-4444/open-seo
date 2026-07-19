@@ -18,6 +18,7 @@ import {
 } from "@/server/lib/dataforseo/envelope";
 import { isHostedServerAuthMode } from "@/server/lib/runtime-env";
 import { AppError } from "@/server/lib/errors";
+import { recordProviderCostUsd } from "@/server/lib/dataforseo/provider-cost-context";
 
 export { mapDataforseoPathToCreditFeature };
 
@@ -143,6 +144,7 @@ async function meterDataforseoCall<T>(
 
   if (!isHostedMode) {
     const result = await execute();
+    recordProviderCostUsd(result.billing.costUsd);
     return result.data;
   }
 
@@ -157,6 +159,7 @@ async function meterDataforseoCall<T>(
     result = await execute();
   } catch (error) {
     if (error instanceof DataforseoChargedTaskError) {
+      recordProviderCostUsd(error.billing.costUsd);
       // A malformed request (DataForSEO "Invalid Field: ...") that DataForSEO
       // did not bill returns no value to the customer, so don't charge — surface
       // it as a non-reportable VALIDATION_ERROR. If DataForSEO still billed us
@@ -183,6 +186,7 @@ async function meterDataforseoCall<T>(
     monthlyRemaining,
     creditFeature,
   });
+  recordProviderCostUsd(result.billing.costUsd);
 
   return result.data;
 }

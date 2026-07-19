@@ -5,6 +5,10 @@ import {
   requireMcpToolAuthContext,
   type ToolExtra,
 } from "@/server/mcp/context";
+import {
+  attachProviderCostToMcpResult,
+  runWithProviderCostCapture,
+} from "@/server/lib/dataforseo/provider-cost-context";
 
 type ProjectScopedArgs = {
   projectId: string;
@@ -44,6 +48,9 @@ export function withMcpProjectAuth<TArgs extends ProjectScopedArgs, TResult>(
 ) {
   return async (args: TArgs, extra: ToolExtra) => {
     const context = await requireProjectAccess(extra, args.projectId);
-    return handler(args, context);
+    const { result, providerCostUsd } = await runWithProviderCostCapture(() =>
+      handler(args, context),
+    );
+    return attachProviderCostToMcpResult(result, providerCostUsd);
   };
 }

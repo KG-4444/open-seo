@@ -102,6 +102,58 @@ describe("withMcpProjectAuth", () => {
     );
   });
 
+  it("adds the aggregate provider cost to MCP response metadata", async () => {
+    const { withMcpProjectAuth } = await import("@/server/mcp/project-auth");
+    const { recordProviderCostUsd } =
+      await import("@/server/lib/dataforseo/provider-cost-context");
+    const handler = vi.fn().mockImplementation(() => {
+      recordProviderCostUsd(0.012);
+      recordProviderCostUsd(0.003);
+      return {
+        content: [{ type: "text", text: "ok" }],
+        structuredContent: {
+          rows: [],
+          meta: { projectId: "project_123" },
+        },
+        _meta: { projectId: "project_123" },
+      };
+    });
+
+    const result: unknown = await withMcpProjectAuth(handler)(
+      { projectId: "project_123" },
+      toolExtra,
+    );
+
+    expect(result).toMatchObject({
+      structuredContent: {
+        meta: {
+          projectId: "project_123",
+          providerCostUsd: 0.015,
+        },
+      },
+      _meta: {
+        projectId: "project_123",
+        providerCostUsd: 0.015,
+      },
+    });
+  });
+
+  it("does not invent provider cost metadata for zero-provider handlers", async () => {
+    const { withMcpProjectAuth } = await import("@/server/mcp/project-auth");
+    const handler = vi.fn().mockReturnValue({
+      content: [{ type: "text", text: "ok" }],
+      structuredContent: { rows: [] },
+    });
+
+    const result: unknown = await withMcpProjectAuth(handler)(
+      { projectId: "project_123" },
+      toolExtra,
+    );
+
+    expect(result).not.toHaveProperty("_meta.providerCostUsd");
+    expect(result).not.toHaveProperty("structuredContent.meta.providerCostUsd");
+  });
+
   it("propagates project access failures without calling the wrapped handler", async () => {
     const error = new Error("project not found");
     mocks.getProjectForOrganization.mockRejectedValue(error);
