@@ -26,6 +26,16 @@ function taskItems<T>(task: KeywordsDataResult<T>): T[] {
   return task.result ?? [];
 }
 
+// SERP and Labs use Google's BCP-47 Chinese codes (`zh-CN` / `zh-TW`), while
+// the Google Ads Keywords Data endpoints publish underscore variants. Keep the
+// application's canonical language unchanged and translate only at this
+// provider boundary.
+export function toGoogleAdsLanguageCode(languageCode: string): string {
+  if (languageCode === "zh-CN") return "zh_CN";
+  if (languageCode === "zh-TW") return "zh_TW";
+  return languageCode;
+}
+
 export async function fetchAdsSearchVolume(input: {
   keywords: string[];
   locationCode: number;
@@ -44,7 +54,7 @@ export async function fetchAdsSearchVolume(input: {
     new KeywordsDataGoogleAdsSearchVolumeLiveRequestInfo({
       keywords: input.keywords,
       ...locationParams,
-      language_code: input.languageCode,
+      language_code: toGoogleAdsLanguageCode(input.languageCode),
     }),
   ]);
   const task = assertOk(response);
@@ -64,7 +74,7 @@ export async function fetchAdsKeywordIdeas(input: {
     new KeywordsDataGoogleAdsKeywordsForKeywordsLiveRequestInfo({
       keywords: [input.keyword],
       location_code: input.locationCode,
-      language_code: input.languageCode,
+      language_code: toGoogleAdsLanguageCode(input.languageCode),
       sort_by: "search_volume",
     }),
   ]);
