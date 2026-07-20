@@ -9,6 +9,10 @@ import { getSerpResultsTool } from "@/server/mcp/tools/get-serp-results";
 import { listProjectsTool } from "@/server/mcp/tools/list-projects";
 import { listSavedKeywordsTool } from "@/server/mcp/tools/list-saved-keywords";
 import {
+  collectQueuedRankChecksTool,
+  postQueuedRankChecksTool,
+} from "@/server/mcp/tools/queued-rank-checks";
+import {
   findSerpCompetitorsTool,
   getGoogleBusinessQuestionsTool,
   getKeywordMetricsTool,
@@ -133,6 +137,24 @@ export function registerOpenSeoMcpTools(server: McpServer) {
       getRankTrackerTool.name,
       getRankTrackerTool.config.outputSchema,
       getRankTrackerTool.handler,
+    ),
+  );
+  server.registerTool(
+    postQueuedRankChecksTool.name,
+    postQueuedRankChecksTool.config,
+    instrumentMcpToolHandler(
+      postQueuedRankChecksTool.name,
+      postQueuedRankChecksTool.config.outputSchema,
+      postQueuedRankChecksTool.handler,
+    ),
+  );
+  server.registerTool(
+    collectQueuedRankChecksTool.name,
+    collectQueuedRankChecksTool.config,
+    instrumentMcpToolHandler(
+      collectQueuedRankChecksTool.name,
+      collectQueuedRankChecksTool.config.outputSchema,
+      collectQueuedRankChecksTool.handler,
     ),
   );
   server.registerTool(
