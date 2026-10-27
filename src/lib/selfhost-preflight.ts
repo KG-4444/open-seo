@@ -260,28 +260,43 @@ function checkOptionalFeatures(env: EnvRecord, items: PreflightItem[]): void {
   }
 
   items.push(
-    get(env, "AUTH_MODE") === "everyapp"
+    get(env, "AI_PROVIDER") === "doubao"
       ? {
           key: "ai",
           name: "AI features",
-          level: "info",
-          message:
-            "OpenRouter comes from the Every App gateway. An admin sets it with `pnpm everyapp secret set OPENROUTER_API_KEY`.",
+          level: ["DOUBAO_API_KEY", "DOUBAO_BASE_URL", "DOUBAO_MODEL"].every(
+            (key) => get(env, key),
+          )
+            ? "ok"
+            : "fail",
+          message: ["DOUBAO_API_KEY", "DOUBAO_BASE_URL", "DOUBAO_MODEL"].every(
+            (key) => get(env, key),
+          )
+            ? "Doubao configured"
+            : "Doubao requires DOUBAO_API_KEY, DOUBAO_BASE_URL and DOUBAO_MODEL",
         }
-      : get(env, "OPENROUTER_API_KEY")
+      : get(env, "AUTH_MODE") === "everyapp"
         ? {
-            key: "ai",
-            name: "AI features",
-            level: "ok",
-            message: "OPENROUTER_API_KEY set",
-          }
-        : {
             key: "ai",
             name: "AI features",
             level: "info",
             message:
-              "OPENROUTER_API_KEY not set (optional) — SAM, the in-app SEO agent, is disabled.",
-          },
+              "OpenRouter comes from the Every App gateway. An admin sets it with `pnpm everyapp secret set OPENROUTER_API_KEY`.",
+          }
+        : get(env, "OPENROUTER_API_KEY")
+          ? {
+              key: "ai",
+              name: "AI features",
+              level: "ok",
+              message: "OPENROUTER_API_KEY set",
+            }
+          : {
+              key: "ai",
+              name: "AI features",
+              level: "info",
+              message:
+                "OPENROUTER_API_KEY not set (optional) — SAM, the in-app SEO agent, is disabled.",
+            },
   );
 
   items.push(

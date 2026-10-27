@@ -287,24 +287,31 @@ async function inspectUrls(input: {
     userId: connection.connectedByUserId,
     gscAccountId: connection.gscAccountId ?? undefined,
   });
-  const results = await Promise.all(
-    input.urls.map(async (url): Promise<GscUrlInspection> => {
+  const results: GscUrlInspection[] = [];
+  let nextIndex = 0;
+  const inspectNext = async () => {
+    while (nextIndex < input.urls.length) {
+      const index = nextIndex++;
+      const url = input.urls[index];
       try {
         const result = await client.inspectUrl(
           connection.siteUrl,
           url,
           input.languageCode,
         );
-        return { url, result };
+        results[index] = { url, result };
       } catch (error) {
         if (error instanceof GscTokenError) throw error;
-        return {
+        results[index] = {
           url,
           result: null,
           error: error instanceof Error ? error.message : "Inspection failed",
         };
       }
-    }),
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(5, input.urls.length) }, () => inspectNext()),
   );
   return {
     siteUrl: connection.siteUrl,

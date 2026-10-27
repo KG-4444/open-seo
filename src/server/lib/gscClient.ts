@@ -3,11 +3,17 @@ import { getGoogleAccessMode } from "@/server/features/google/googleAccess";
 import { getGatewayGoogleFetch } from "@/server/features/google/gatewayGoogle";
 import { GSC_OAUTH_PROVIDER_ID } from "@/shared/gsc";
 import { GscApiError, GscTokenError } from "./gscErrors";
+import { getEnvValueSync } from "./runtime-env";
 
 export { GscApiError, GscTokenError } from "./gscErrors";
 
-const GSC_API_BASE = "https://www.googleapis.com/webmasters/v3";
-const GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo";
+const relayOrigin = getEnvValueSync({}, "GOOGLE_API_RELAY_ORIGIN");
+const GSC_API_BASE = relayOrigin
+  ? `${relayOrigin}/gsc/webmasters/v3`
+  : "https://www.googleapis.com/webmasters/v3";
+const GOOGLE_USERINFO_URL = relayOrigin
+  ? `${relayOrigin}/gsc/userinfo`
+  : "https://openidconnect.googleapis.com/v1/userinfo";
 
 /** A GSC REST call returned a non-2xx status. `status` drives user-facing messaging. */
 export type GscSite = {
@@ -188,7 +194,9 @@ export function createGscClient(opts: {
       languageCode?: string,
     ): Promise<UrlInspectionResult | null> {
       const data = await request<{ inspectionResult?: UrlInspectionResult }>(
-        "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect",
+        relayOrigin
+          ? `${relayOrigin}/gsc/url-inspection`
+          : "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect",
         {
           method: "POST",
           body: {

@@ -30,12 +30,20 @@ const openRouterUsageSchema = z.object({
   openrouter: z.object({ usage: z.object({ cost: z.number() }) }),
 });
 
-export function openRouterCostUsd(providerMetadata: unknown): number {
+export function openRouterCostUsd(
+  providerMetadata: unknown,
+  provider = "openrouter",
+): number | null {
+  if (provider === "doubao") return null;
   const parsed = openRouterUsageSchema.safeParse(providerMetadata);
   return parsed.success ? parsed.data.openrouter.usage.cost : 0;
 }
 
-export function requireOpenRouterCostUsd(providerMetadata: unknown): number {
+export function requireOpenRouterCostUsd(
+  providerMetadata: unknown,
+  provider = "openrouter",
+): number | null {
+  if (provider === "doubao") return null;
   return openRouterUsageSchema.parse(providerMetadata).openrouter.usage.cost;
 }
 

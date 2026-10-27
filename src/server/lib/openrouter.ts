@@ -5,6 +5,7 @@ import {
   type OpenRouterProvider,
 } from "@openrouter/ai-sdk-provider";
 import { wrapLanguageModel } from "ai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { isEveryAppAuthMode } from "@/lib/auth-mode";
 import { gatewayCallFor } from "@/server/lib/gateway-attribution";
 import { getEnvValueSync, getWorkersEnv } from "@/server/lib/runtime-env";
@@ -17,10 +18,17 @@ import { getEnvValueSync, getWorkersEnv } from "@/server/lib/runtime-env";
  */
 export type OpenRouterAccess =
   | { apiKey: string }
-  | { gatewayFetch: typeof fetch };
+  | { gatewayFetch: typeof fetch }
+  | { provider: "doubao"; apiKey: string; baseURL: string; model: string };
 
 const GATEWAY_BASE_URL =
   "https://every-app-gateway.invalid/api/ai/openrouter/api/v1";
+
+export function aiProvider(env: object): "doubao" | "openrouter" {
+  return getEnvValueSync(env, "AI_PROVIDER") === "doubao"
+    ? "doubao"
+    : "openrouter";
+}
 
 function isBehindEveryAppGateway(env: object): boolean {
   return isEveryAppAuthMode(getEnvValueSync(env, "AUTH_MODE"));
@@ -39,6 +47,17 @@ function gatewayOpenRouterFetch(env: object): typeof fetch {
  * samAccess.
  */
 export function getOpenRouterAccess(env: object): OpenRouterAccess | null {
+  if (getEnvValueSync(env, "AI_PROVIDER") === "doubao") {
+    const apiKey = getEnvValueSync(env, "DOUBAO_API_KEY");
+    const baseURL = getEnvValueSync(env, "DOUBAO_BASE_URL");
+    const model = getEnvValueSync(env, "DOUBAO_MODEL");
+    if (!apiKey || !baseURL || !model) {
+      throw new Error(
+        "Doubao requires DOUBAO_API_KEY, DOUBAO_BASE_URL and DOUBAO_MODEL",
+      );
+    }
+    return { provider: "doubao", apiKey, baseURL, model };
+  }
   if (isBehindEveryAppGateway(env)) {
     try {
       return { gatewayFetch: gatewayOpenRouterFetch(env) };
@@ -60,7 +79,7 @@ export function buildSamChatModel(
 ): LanguageModelV3 {
   const access = getOpenRouterAccess(env);
   if (!access) {
-    throw new Error("OPENROUTER_API_KEY is required for the SAM agent");
+    throw new Error("An AI provider must be configured for the SAM agent");
   }
   return buildChatAgentModel(
     access,
@@ -139,6 +158,21 @@ export function buildChatAgentModel(
   modelId?: string,
   reasoningEffort: "max" | "low" = "max",
 ): LanguageModelV3 {
+  if ("provider" in access && access.provider === "doubao") {
+    return createOpenAICompatible({
+      name: "doubao",
+      apiKey: access.apiKey,
+      baseURL: access.baseURL,
+      includeUsage: true,
+      supportsStructuredOutputs: true,
+      // Ark thinking defaults on; disable explicitly so tool-call histories
+      // use the ordinary OpenAI-compatible protocol.
+      transformRequestBody: (body) => ({
+        ...body,
+        thinking: { type: "disabled" },
+      }),
+    }).chatModel(access.model);
+  }
   const model = modelId ?? DEFAULT_CHAT_AGENT_MODEL;
   const openrouter =
     "apiKey" in access

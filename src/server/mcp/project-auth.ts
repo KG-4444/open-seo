@@ -1,6 +1,10 @@
 import { ProjectService } from "@/server/features/projects/services/ProjectService";
 import { AppError } from "@/server/lib/errors";
 import { buildBillingCustomer, type ToolContext } from "@/server/mcp/context";
+import {
+  attachProviderCostToMcpResult,
+  runWithProviderCostCapture,
+} from "@/server/lib/dataforseo/provider-cost-context";
 
 type ProjectScopedArgs = {
   projectId: string;
@@ -44,6 +48,9 @@ export function withMcpProjectAuth<TArgs extends ProjectScopedArgs, TResult>(
 ) {
   return async (args: TArgs, toolContext: ToolContext) => {
     const context = await requireProjectAccess(toolContext, args.projectId);
-    return handler(args, context);
+    const { result, providerCostUsd } = await runWithProviderCostCapture(() =>
+      handler(args, context),
+    );
+    return attachProviderCostToMcpResult(result, providerCostUsd);
   };
 }

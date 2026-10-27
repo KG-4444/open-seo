@@ -25,6 +25,11 @@ export type AdsKeywordIdeaItem = AdsKeywordItem;
 
 type KeywordsDataTask<T> = DataforseoTaskLike & { result?: T[] };
 
+// Google Ads uses underscores; SERP/Labs retain the application's BCP-47 code.
+function adsLanguageCode(code: string): string {
+  return code === "zh-TW" ? "zh_TW" : code === "zh-CN" ? "zh_CN" : code;
+}
+
 function taskItems<T>(task: KeywordsDataTask<T>): T[] {
   // keywords_data tasks return keyword items directly in `result` (no nested
   // `items` wrapper like Labs).
@@ -66,7 +71,7 @@ export async function fetchAdsSearchVolume(input: {
       {
         keywords: input.keywords,
         ...locationParams,
-        language_code: input.languageCode,
+        language_code: adsLanguageCode(input.languageCode),
       },
     ],
   );
@@ -89,7 +94,7 @@ export async function fetchAdsKeywordIdeas(input: {
       {
         keywords: [input.keyword],
         location_code: input.locationCode,
-        language_code: input.languageCode,
+        language_code: adsLanguageCode(input.languageCode),
         sort_by: "search_volume",
       },
     ],

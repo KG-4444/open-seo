@@ -259,6 +259,8 @@ async function relevantQuestions(
   const cached = z.array(z.string()).safeParse(await getCached(cacheKey));
   if (cached.success) return new Set(cached.data);
 
+  const provider =
+    "provider" in input.openRouter ? input.openRouter.provider : "openrouter";
   const result = await generateText({
     model: buildChatAgentModel(
       input.openRouter,
@@ -273,10 +275,10 @@ async function relevantQuestions(
     prompt,
     // Admitted above, so settle the actual cost even if credits ran out since.
     onStepFinish: async (step) => {
-      const costUsd = requireOpenRouterCostUsd(step.providerMetadata);
+      const costUsd = requireOpenRouterCostUsd(step.providerMetadata, provider);
       await billResearchSpend({ ...customer, projectId: input.projectId }, [
         {
-          provider: "openrouter",
+          provider,
           creditFeature: "agent",
           operation: "ai_prompt_research_relevance",
           costUsd,

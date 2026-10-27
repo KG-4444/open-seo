@@ -74,9 +74,11 @@ export async function generateAiPrompts(
   const outputSchema = topicName
     ? suggestedAiTopicSchema.extend({ name: z.string().trim().min(1).max(120) })
     : suggestedAiTopicSchema;
+  const access = await requireOpenRouterAccess();
+  const provider = "provider" in access ? access.provider : "openrouter";
   const result = await generateText({
     model: buildChatAgentModel(
-      await requireOpenRouterAccess(),
+      access,
       await getOptionalEnvValue("OPENROUTER_MODEL"),
       "low",
     ),
@@ -103,10 +105,10 @@ export async function generateAiPrompts(
     }),
     // Admitted above, so settle the actual cost even if credits ran out since.
     onStepFinish: async (step) => {
-      const costUsd = requireOpenRouterCostUsd(step.providerMetadata);
+      const costUsd = requireOpenRouterCostUsd(step.providerMetadata, provider);
       await billResearchSpend({ ...customer, projectId: input.projectId }, [
         {
-          provider: "openrouter",
+          provider,
           creditFeature: "agent",
           operation: "ai_prompt_generation",
           costUsd,

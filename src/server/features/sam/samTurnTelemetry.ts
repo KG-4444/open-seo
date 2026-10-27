@@ -36,6 +36,7 @@ function toolCallFailed(ctx: ToolCallResultContext): boolean {
  * makes, and the join key between the two.
  */
 export class SamTurnStats {
+  constructor(private readonly provider = "openrouter") {}
   readonly turnId = crypto.randomUUID();
   readonly startedAt = Date.now();
   private lastStepEndedAt = this.startedAt;
@@ -48,7 +49,7 @@ export class SamTurnStats {
   outputTokens = 0;
   reasoningTokens = 0;
   cachedInputTokens = 0;
-  costUsd = 0;
+  costUsd: number | null = 0;
   credits = 0;
   compactions = 0;
   toolCalls = 0;
@@ -61,7 +62,10 @@ export class SamTurnStats {
    * recorded separately (recordSpend) because compaction summaries spend
    * outside the step loop.
    */
-  recordStep(ctx: StepContext, costUsd: number): Record<string, unknown> {
+  recordStep(
+    ctx: StepContext,
+    costUsd: number | null,
+  ): Record<string, unknown> {
     const now = Date.now();
     const latencySeconds = (now - this.lastStepEndedAt) / 1000;
     this.lastStepEndedAt = now;
@@ -81,13 +85,15 @@ export class SamTurnStats {
       $ai_parent_id: this.turnId,
       $ai_span_id: crypto.randomUUID(),
       $ai_span_name: `step ${this.steps}`,
-      $ai_provider: "openrouter",
+      $ai_provider: this.provider,
       $ai_model: ctx.response.modelId,
       $ai_input_tokens: usage.inputTokens ?? 0,
       $ai_output_tokens: usage.outputTokens ?? 0,
       $ai_reasoning_tokens: reasoning,
       $ai_cache_read_input_tokens: cached,
-      $ai_total_cost_usd: costUsd,
+      ...(costUsd === null
+        ? { cost_status: "unreported" }
+        : { $ai_total_cost_usd: costUsd }),
       $ai_latency: latencySeconds,
       $ai_is_error: false,
       $ai_tools_called: ctx.toolCalls.map((call) => call.toolName).join(","),
@@ -102,8 +108,9 @@ export class SamTurnStats {
     if (toolCallFailed(ctx)) this.toolFailures += 1;
   }
 
-  recordSpend(costUsd: number): void {
-    this.costUsd += costUsd;
+  recordSpend(costUsd: number | null): void {
+    this.costUsd =
+      this.costUsd === null || costUsd === null ? null : this.costUsd + costUsd;
   }
 
   /** The `sam:turn` event body. */
@@ -138,7 +145,7 @@ export class SamTurnStats {
     return {
       $ai_trace_id: this.turnId,
       $ai_span_name: "sam_turn",
-      $ai_provider: "openrouter",
+      $ai_provider: this.provider,
       $ai_model: this.model,
       $ai_latency: (Date.now() - this.startedAt) / 1000,
       $ai_is_error: status === "error",
@@ -184,6 +191,7 @@ export class SamTelemetry {
     // fresh DO whose session row is not loaded when recovery reports.
     private readonly identity: () => Promise<SamIdentity | null>,
     private readonly waitUntil: (promise: Promise<unknown>) => void,
+    private readonly provider: () => string = () => "openrouter",
   ) {}
 
   get turn(): SamTurnStats | null {
@@ -191,13 +199,13 @@ export class SamTelemetry {
   }
 
   beginTurn(continuation: boolean): SamTurnStats {
-    const turn = new SamTurnStats();
+    const turn = new SamTurnStats(this.provider());
     turn.continuation = continuation;
     this.current = turn;
     return turn;
   }
 
-  spend(costUsd: number): void {
+  spend(costUsd: number | null): void {
     this.current?.recordSpend(costUsd);
   }
 
@@ -205,7 +213,7 @@ export class SamTelemetry {
     if (this.current) this.current.compactions += 1;
   }
 
-  step(ctx: StepContext, costUsd: number): void {
+  step(ctx: StepContext, costUsd: number | null): void {
     const turn = this.current;
     // Refusals answer through the canned model: no provider call to trace.
     if (!turn || turn.refusal) return;
@@ -252,7 +260,7 @@ export class SamTelemetry {
     let turn = this.current;
     if (!turn || turn.reported) {
       if (!synthesize) return;
-      turn = new SamTurnStats();
+      turn = new SamTurnStats(this.provider());
     }
     turn.reported = true;
     const status: SamTurnStatus =

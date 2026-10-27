@@ -65,6 +65,7 @@ import {
 } from "@/server/lib/dataforseo/ai-tracking";
 import { isHostedServerAuthMode } from "@/server/lib/runtime-env";
 import { AppError } from "@/server/lib/errors";
+import { recordProviderCostUsd } from "@/server/lib/dataforseo/provider-cost-context";
 
 export { mapDataforseoPathToCreditFeature };
 
@@ -352,7 +353,18 @@ async function meterDataforseoCalls<T>(
 
   if (!isHostedMode) {
     return Promise.allSettled(
-      executes.map(async (execute) => (await execute()).data),
+      executes.map(async (execute) => {
+        try {
+          const result = await execute();
+          recordProviderCostUsd(result.billing.costUsd);
+          return result.data;
+        } catch (error) {
+          if (error instanceof DataforseoChargedTaskError) {
+            recordProviderCostUsd(error.billing.costUsd);
+          }
+          throw error;
+        }
+      }),
     );
   }
 
@@ -376,10 +388,12 @@ async function meterDataforseoCalls<T>(
         try {
           const result = await execute();
           billed[index] = result.billing;
+          recordProviderCostUsd(result.billing.costUsd);
           return result.data;
         } catch (error) {
           // Transport / auth / upstream failure: nothing was billed.
           if (!(error instanceof DataforseoChargedTaskError)) throw error;
+          recordProviderCostUsd(error.billing.costUsd);
           // A malformed request (DataForSEO "Invalid Field: ...") that
           // DataForSEO did not bill returns no value to the customer, so don't
           // charge — surface it as a non-reportable VALIDATION_ERROR. If

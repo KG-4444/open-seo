@@ -7,10 +7,10 @@ import { isHostedServerAuthMode } from "@/server/lib/runtime-env";
 import type { CreditFeature } from "@/shared/billing-credit-features";
 
 export type ResearchSpend = {
-  provider: "openrouter" | "dataforseo" | "context";
+  provider: "openrouter" | "dataforseo" | "context" | "doubao";
   creditFeature: CreditFeature;
   operation: string;
-  costUsd: number;
+  costUsd: number | null;
 };
 
 /** Settle admitted research after it finishes; depletion must never block it. */
@@ -18,7 +18,10 @@ export async function billResearchSpend(
   customer: BillingCustomerContext,
   spend: ResearchSpend[],
 ) {
-  const charges = spend.filter(({ costUsd }) => costUsd > 0);
+  const charges = spend.filter(
+    (item): item is ResearchSpend & { costUsd: number } =>
+      item.costUsd !== null && item.costUsd > 0,
+  );
   if (!charges.length) return;
   try {
     if (!(await isHostedServerAuthMode())) return;

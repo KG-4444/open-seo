@@ -6,7 +6,7 @@ on:
       source_tag:
         description: Fork tag to build and publish
         required: true
-        default: v0.0.28-oyai.1
+        default: v0.1.19-oyai.1
         type: string
 
 permissions:
@@ -25,8 +25,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "${SOURCE_TAG}" =~ ^v0\.0\.28-oyai\.[1-9][0-9]*$ ]]; then
-            echo "source_tag must match v0.0.28-oyai.N" >&2
+          if [[ ! "${SOURCE_TAG}" =~ ^v0\.(0\.28|1\.19)-oyai\.[1-9][0-9]*$ ]]; then
+            echo "source_tag must match v0.0.28-oyai.N or v0.1.19-oyai.N" >&2
             exit 2
           fi
 
@@ -55,7 +55,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.selfhost
+          file: ${{ startsWith(inputs.source_tag, 'v0.1.19-') && 'deploy/docker/Dockerfile' || 'Dockerfile.selfhost' }}
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE }}:${{ inputs.source_tag }}

@@ -1,8 +1,13 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
+import { getEnvValueSync } from "@/server/lib/runtime-env";
 
 const googleKeys = createRemoteJWKSet(
-  new URL("https://www.googleapis.com/oauth2/v3/certs"),
+  new URL(
+    getEnvValueSync({}, "GOOGLE_API_RELAY_ORIGIN")
+      ? `${getEnvValueSync({}, "GOOGLE_API_RELAY_ORIGIN")}/gsc/certs`
+      : "https://www.googleapis.com/oauth2/v3/certs",
+  ),
 );
 const googleIdentitySchema = z.object({
   sub: z.string().min(1),

@@ -31,7 +31,7 @@ import {
   SamTelemetry,
   type SamTurnStats,
 } from "@/server/features/sam/samTurnTelemetry";
-import { buildSamChatModel } from "@/server/lib/openrouter";
+import { aiProvider, buildSamChatModel } from "@/server/lib/openrouter";
 import {
   isHostedServerAuthMode,
   usesBetterAuthServer,
@@ -153,6 +153,7 @@ export class SamChatAgent extends Think {
     () => this.name,
     () => withPgClient(() => this.loadSamContext()),
     (promise) => this.ctx.waitUntil(promise),
+    () => aiProvider(this.env),
   );
 
   // Mid-turn context guard, using the compaction configured in
@@ -229,7 +230,9 @@ export class SamChatAgent extends Think {
       model: this.buildModel("low"),
       prompt,
     });
-    this.recordSpend(openRouterCostUsd(result.providerMetadata));
+    this.recordSpend(
+      openRouterCostUsd(result.providerMetadata, aiProvider(this.env)),
+    );
     this.telemetry.compaction();
     return result.text;
   }
@@ -387,7 +390,10 @@ export class SamChatAgent extends Think {
   }
 
   onStepFinish(ctx: StepContext): void {
-    const costUsd = openRouterCostUsd(ctx.providerMetadata);
+    const costUsd = openRouterCostUsd(
+      ctx.providerMetadata,
+      aiProvider(this.env),
+    );
     this.recordSpend(costUsd);
     this.telemetry.step(ctx, costUsd);
   }
@@ -395,9 +401,10 @@ export class SamChatAgent extends Think {
   // Add spend to the turn's unbilled total and meter it once a chunk has
   // accumulated, or on `flush` at the end of the turn. Self-hosted turns (no
   // armed balance) are never metered.
-  private recordSpend(costUsd: number, { flush = false } = {}): void {
-    this.turnUnbilledUsd += costUsd;
+  private recordSpend(costUsd: number | null, { flush = false } = {}): void {
     this.telemetry.spend(costUsd);
+    if (costUsd === null) return;
+    this.turnUnbilledUsd += costUsd;
     const armed = this.turnMonthlyRemaining;
     if (armed === null) return;
     if (!flush && this.turnUnbilledUsd < SAM_BILLING_CHUNK_USD) return;

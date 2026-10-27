@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => {
     vi.fn<(opts: GscClientOptions) => Promise<string | null>>();
   const querySearchAnalytics =
     vi.fn<(opts: GscClientOptions) => Promise<never[]>>();
+  const inspectUrl = vi.fn();
   const dbSelect = vi.fn(() => ({
     from: vi.fn(() => ({
       where: vi.fn(() => {
@@ -30,10 +31,12 @@ const mocks = vi.hoisted(() => {
     listSites,
     getUserInfoEmail,
     querySearchAnalytics,
+    inspectUrl,
     createGscClient: vi.fn((opts: GscClientOptions) => ({
       listSites: () => listSites(opts),
       getUserInfoEmail: () => getUserInfoEmail(opts),
       querySearchAnalytics: () => querySearchAnalytics(opts),
+      inspectUrl,
     })),
     upsert: vi.fn(),
     getByProjectId: vi.fn(),
@@ -60,6 +63,31 @@ const baseInput = {
   accountId: "sub-a",
   userId: "u1",
 };
+
+describe("GscService.inspectUrls", () => {
+  it("bounds inspection concurrency to five while retaining input order", async () => {
+    mocks.getByProjectId.mockResolvedValue({
+      siteUrl: "https://oyjob.cn/",
+      connectedByUserId: "u1",
+      gscAccountId: "sub-a",
+    });
+    let active = 0;
+    let peak = 0;
+    mocks.inspectUrl.mockImplementation(async (_site: string, url: string) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await Promise.resolve();
+      active -= 1;
+      return { inspectionResultLink: url };
+    });
+    const urls = Array.from({ length: 12 }, (_, i) => `https://oyjob.cn/${i}`);
+    const result = await GscService.inspectUrls({ projectId: "p1", urls });
+    expect(peak).toBe(5);
+    expect(
+      result.results.map((item) => item.result?.inspectionResultLink),
+    ).toEqual(urls);
+  });
+});
 
 describe("GscService.setSite", () => {
   beforeEach(() => {

@@ -9,6 +9,26 @@ function itemFor(
 }
 
 describe("runSelfhostPreflight", () => {
+  it("requires all settings for the explicitly selected Doubao provider", () => {
+    const base = {
+      AUTH_MODE: "local_noauth",
+      AI_PROVIDER: "doubao",
+      OPENROUTER_API_KEY: "unrelated",
+    };
+    expect(itemFor(runSelfhostPreflight(base), "AI features")?.level).toBe(
+      "fail",
+    );
+    const configured = runSelfhostPreflight({
+      ...base,
+      DOUBAO_API_KEY: "private",
+      DOUBAO_BASE_URL: "https://ark.cn-beijing.volces.com/api/plan/v3",
+      DOUBAO_MODEL: "doubao-seed-2.0-lite",
+    });
+    expect(itemFor(configured, "AI features")?.message).toBe(
+      "Doubao configured",
+    );
+    expect(itemFor(configured, "AI features")?.level).toBe("ok");
+  });
   it("passes the stock Docker setup (local_noauth + DataForSEO key)", () => {
     const result = runSelfhostPreflight({
       AUTH_MODE: "local_noauth",

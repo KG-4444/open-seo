@@ -36,6 +36,8 @@ Optional env values:
 
 AI Visibility uses your `DATAFORSEO_API_KEY` and sends tracked questions to DataForSEO. Set `OPENROUTER_API_KEY` for setup research, Prompt Research, and generated prompt suggestions. You pay providers directly; the app shows the collection cost before a check or schedule starts. Keep the container running for background answers and daily, weekly, or monthly tracking. The built-in scheduler checks for due work every five minutes; no host cron setup is required. See the [AI Visibility guide](https://openseo.so/docs/ai-visibility).
 
+The OYAI fork also supports `AI_PROVIDER=doubao` with `DOUBAO_API_KEY`, `DOUBAO_BASE_URL` and `DOUBAO_MODEL` set together. These configure SAM and AI research, not DataForSEO's separate AI-visibility observations. Provider errors do not switch to OpenRouter. Token usage is retained; when Doubao does not report a USD cost, it remains unknown rather than a zero-dollar observation. Keep the API key in private runtime secrets, not in source control.
+
 If you are putting Docker behind a reverse proxy or a temporary tunnel, remember that Docker self-hosting runs with app auth disabled. Only expose it behind your own auth-protected reverse proxy, tunnel, or private network, and add the public hostname before restarting:
 
 ```bash

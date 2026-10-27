@@ -165,9 +165,11 @@ export async function researchWebsite(
       searchSucceeded = false;
       searchOutage = false;
       sources.clear();
+      const access = await requireOpenRouterAccess();
+      const provider = "provider" in access ? access.provider : "openrouter";
       return generateText({
         model: buildChatAgentModel(
-          await requireOpenRouterAccess(),
+          access,
           await getOptionalEnvValue("OPENROUTER_MODEL"),
           "low",
         ),
@@ -330,9 +332,9 @@ export async function researchWebsite(
           : undefined,
         onStepFinish: (step) => {
           spend.push({
-            provider: "openrouter",
+            provider,
             creditFeature: "agent",
-            costUsd: requireOpenRouterCostUsd(step.providerMetadata),
+            costUsd: requireOpenRouterCostUsd(step.providerMetadata, provider),
             operation: "project_website_research",
           });
         },

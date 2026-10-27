@@ -7,6 +7,7 @@ import { getAuth } from "@/lib/auth";
 import { resolveUserContextFromHeaders } from "@/middleware/ensure-user/resolve";
 import { AppError } from "@/server/lib/errors";
 import { responseForAppError } from "@/server/lib/http-errors";
+import { getEnvValueSync } from "@/server/lib/runtime-env";
 import { getPublicOrigin } from "@/server/mcp/public-origin";
 import {
   GA4_DATA_SCOPE,
@@ -50,8 +51,13 @@ import { ownGoogleCallbackDisabled } from "./googleAccess";
  */
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+const relayOrigin = getEnvValueSync({}, "GOOGLE_API_RELAY_ORIGIN");
+const GOOGLE_TOKEN_URL = relayOrigin
+  ? `${relayOrigin}/token`
+  : "https://oauth2.googleapis.com/token";
+const GOOGLE_REVOKE_URL = relayOrigin
+  ? `${relayOrigin}/revoke`
+  : "https://oauth2.googleapis.com/revoke";
 // Refresh when the stored access token is within this many ms of expiry.
 const ACCESS_TOKEN_SKEW_MS = 5_000;
 

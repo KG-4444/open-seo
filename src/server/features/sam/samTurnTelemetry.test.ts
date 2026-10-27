@@ -37,6 +37,28 @@ const toolCall = (overrides: Record<string, unknown> = {}) =>
   }) as unknown as ToolCallResultContext;
 
 describe("SamTurnStats", () => {
+  it("keeps Doubao token usage without inventing an OpenRouter USD charge", () => {
+    const stats = new SamTurnStats("doubao");
+    const generation = stats.recordStep(
+      step({ response: { modelId: "doubao-seed-2.0-lite" } }),
+      null,
+    );
+    stats.recordSpend(null);
+    stats.recordSpend(0);
+    expect(generation).toMatchObject({
+      $ai_provider: "doubao",
+      $ai_input_tokens: 1000,
+      cost_status: "unreported",
+    });
+    expect(generation).not.toHaveProperty("$ai_total_cost_usd");
+    expect(stats.properties("completed")).toMatchObject({
+      cost_usd: null,
+      input_tokens: 1000,
+    });
+    expect(stats.traceProperties("completed")).toMatchObject({
+      $ai_provider: "doubao",
+    });
+  });
   it("sums steps and tool calls into the turn event, counting {error} outputs as failures", () => {
     const stats = new SamTurnStats();
     // Each generation is linked to the turn as its trace.
