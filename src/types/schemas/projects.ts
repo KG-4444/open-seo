@@ -63,10 +63,9 @@ export const updateProjectSchema = z
   })
   .refine(hasLocationForLanguage, marketPairMessage);
 
-// Market-only update (onboarding). Both halves are required: the caller picks
-// them together, so the service can validate the pair without a stored row.
-export const setProjectMarketSchema = z.object({
+export const setProjectWebsiteSchema = z.object({
   projectId: z.string().min(1),
+  domain: z.string().trim().min(1).max(255),
   locationCode: z
     .number()
     .int()
@@ -89,6 +88,7 @@ export const restoreProjectSchema = z.object({
 
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
-export type SetProjectMarketInput = z.infer<typeof setProjectMarketSchema>;
 export type ArchiveProjectInput = z.infer<typeof archiveProjectSchema>;
 export type RestoreProjectInput = z.infer<typeof restoreProjectSchema>;
+
+export type SetProjectWebsiteInput = z.infer<typeof setProjectWebsiteSchema>;

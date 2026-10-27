@@ -22,12 +22,21 @@ import {
   locationCodeSchema,
   projectIdSchema,
 } from "@/server/mcp/schemas";
+import {
+  RESEARCH_SCOPE_PARAM_DESCRIPTION,
+  researchScopeSchema,
+} from "@/shared/researchScope";
+import { parseResearchTargetOrThrow } from "@/server/lib/domainUtils";
 
 const SUGGESTION_COLUMNS: McpTableColumn<unknown>[] = [
   { header: "keyword", value: (row) => readPath(row, "keyword") },
   { header: "position", value: (row) => readPath(row, "position") },
   { header: "volume", value: (row) => readPath(row, "searchVolume") },
   { header: "KD", value: (row) => readPath(row, "keywordDifficulty") },
+  { header: "CPC", value: (row) => readPath(row, "cpc") },
+  // Rows come back ordered by estimated traffic, so it's the signal behind the
+  // order a text-only client is shown.
+  { header: "traffic", value: (row) => readPath(row, "traffic") },
 ];
 
 const inputSchema = {
@@ -35,7 +44,13 @@ const inputSchema = {
   domain: z
     .string()
     .min(1)
-    .describe("Competitor or reference domain to extract keywords from."),
+    .max(2048)
+    .describe(
+      "Competitor or reference domain or URL to extract keywords from.",
+    ),
+  scope: researchScopeSchema
+    .optional()
+    .describe(RESEARCH_SCOPE_PARAM_DESCRIPTION),
   locationCode: locationCodeSchema.optional(),
   languageCode: languageCodeSchema.optional(),
 } as const;
@@ -49,13 +64,15 @@ export const getDomainKeywordSuggestionsTool = {
     description:
       "Returns the organic keywords a domain ranks for, including position and available metrics. Use after get_domain_overview when you want the detailed keyword opportunity list for a competitor or reference domain. Charges credits (~100-300 typical). Cached for 12 hours.",
     inputSchema,
-    outputSchema: {
+    outputSchema: z.looseObject({
       keywords: z.array(looseObjectOutputSchema),
+      target: z.string().optional(),
+      scope: researchScopeSchema.optional(),
       ...optionalMetaOutputSchema,
-    },
+    }),
     annotations: {
       readOnlyHint: false,
-      openWorldHint: false,
+      openWorldHint: true,
       destructiveHint: false,
     },
   },
@@ -69,6 +86,7 @@ export const getDomainKeywordSuggestionsTool = {
     const keywords = await DomainService.getSuggestedKeywords(
       {
         domain: args.domain,
+        scope: args.scope,
         locationCode,
         languageCode,
         organizationId: context.auth.organizationId,
@@ -76,10 +94,15 @@ export const getDomainKeywordSuggestionsTool = {
       },
       context.billing,
     );
+    // The service already parsed the same input, so this cannot throw here.
+    const parsed = parseResearchTargetOrThrow(args.domain, args.scope);
+    const target = parsed.display;
+    const scope = parsed.scope;
+    const targetLabel = `${target} (scope: ${scope})`;
     const text =
       keywords.length === 0
-        ? `No ranked keywords found for ${args.domain}.`
-        : `Keywords for ${args.domain} (${keywords.length}):\n${formatMcpTable(keywords, SUGGESTION_COLUMNS)}`;
+        ? `No ranked keywords found for ${targetLabel}.`
+        : `Keywords for ${targetLabel} (${keywords.length}). Columns: KD = keyword difficulty (0-100), traffic = estimated monthly organic visits; "—" = unavailable.\n${formatMcpTable(keywords, SUGGESTION_COLUMNS)}`;
     return mcpResponse({
       text,
       meta: buildProjectMeta(
@@ -87,10 +110,11 @@ export const getDomainKeywordSuggestionsTool = {
         args.projectId,
         `/p/${args.projectId}/domain`,
         {
-          domain: args.domain,
+          domain: target,
+          ...(scope ? { scope } : {}),
         },
       ),
-      structuredContent: { keywords },
+      structuredContent: { keywords, target, scope },
     });
   }),
 };

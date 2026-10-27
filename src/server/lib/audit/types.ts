@@ -3,6 +3,7 @@
  */
 
 import { z } from "zod";
+import type { PageFetchClass } from "@/shared/audit-fetch-class";
 import { MIN_AUDIT_PAGES, PAID_MAX_AUDIT_PAGES } from "@/shared/audit-limits";
 import { jsonCodec } from "@/shared/json";
 
@@ -11,6 +12,11 @@ export type LighthouseStrategy = "auto" | "none";
 export interface AuditConfig {
   maxPages: number;
   lighthouseStrategy: LighthouseStrategy;
+  renderJavaScript?: boolean;
+  /** Detected from the start URL's `powered-by` response header. */
+  sitePlatform?: "shopify";
+  /** Which crawler-access credential the crawl replayed, if any. */
+  crawlerCredentialId?: string;
 }
 
 // Read-side only (writes stringify a typed AuditConfig). Stored rows may hold
@@ -29,6 +35,11 @@ const lighthouseStrategySchema = z
 const auditConfigSchema = z.object({
   maxPages: z.number().int().min(MIN_AUDIT_PAGES).max(PAID_MAX_AUDIT_PAGES),
   lighthouseStrategy: lighthouseStrategySchema,
+  renderJavaScript: z.boolean().optional().default(false),
+  // Absent on every audit stored before crawler access shipped, and a future
+  // platform value must not make an old report unviewable.
+  sitePlatform: z.literal("shopify").optional().catch(undefined),
+  crawlerCredentialId: z.string().optional().catch(undefined),
 });
 
 const auditConfigCodec = jsonCodec(auditConfigSchema);
@@ -39,9 +50,6 @@ export function parseAuditConfig(configRaw: string | null): AuditConfig | null {
   return result.success ? result.data : null;
 }
 
-/** How a page fetch resolved. "blocked" = WAF/bot challenge stood in the way. */
-export type PageFetchClass = "ok" | "blocked" | "error";
-
 /** One outgoing link edge, deduped by target URL within a page. */
 export interface PageLink {
   targetUrl: string;
@@ -50,7 +58,7 @@ export interface PageLink {
   isNofollow: boolean;
 }
 
-/** Data extracted from a single page via cheerio. */
+/** Data extracted from a single page's HTML. */
 export interface PageAnalysis {
   url: string;
   statusCode: number;
@@ -73,6 +81,8 @@ export interface PageAnalysis {
   // Content
   wordCount: number;
   bodyText: string;
+  /** Conservative signal of an app shell, not proof of missing content. */
+  javascriptShell?: boolean;
 
   // Images
   images: Array<{ src: string | null; alt: string | null }>;
@@ -106,8 +116,9 @@ export interface LighthouseResult {
 }
 
 /**
- * Full result of crawling one page. Persisted to D1 inside the crawl-batch
- * step; never accumulated in memory or returned as durable step state.
+ * Full result of crawling one page. Persisted to the app DB inside the
+ * crawl-chunk step; never accumulated in memory or returned as durable
+ * step state.
  */
 export interface CrawledPageResult {
   id: string;
@@ -139,6 +150,20 @@ export interface CrawledPageResult {
    * checked; a PDF must not). Transient — not persisted.
    */
   isHtml: boolean;
+  /** App shell, rendered or not; transient signal for the per-page issue reporter. */
+  javascriptShell?: boolean;
+  /**
+   * HTML size read for this page (approximate; capped at MAX_HTML_BYTES).
+   * Transient — feeds the crawl window's memory-pressure signal, since
+   * response time is measured at headers and says nothing about body size.
+   */
+  htmlBytes: number;
+  /**
+   * True when a 429 was retried for this URL (whatever the retry returned).
+   * Not persisted — narrows the crawl window so the pages after it are
+   * fetched more slowly.
+   */
+  rateLimited: boolean;
   imagesTotal: number;
   imagesMissingAlt: number;
   images: Array<{ src: string | null; alt: string | null }>;
@@ -150,19 +175,4 @@ export interface CrawledPageResult {
   /** null = not reached via links (e.g. sitemap-seeded). */
   crawlDepth: number | null;
   inSitemap: boolean;
-}
-
-/**
- * Slim per-page summary returned as durable step state from a crawl batch.
- * Keep this small: full page data lives in D1, not in Workflow step state.
- */
-export interface StepPageSummary {
-  id: string;
-  url: string;
-  statusCode: number;
-  fetchClass: PageFetchClass;
-  redirectUrl: string | null;
-  title: string;
-  /** Normalized same-origin link targets, for frontier expansion. */
-  internalLinks: string[];
 }

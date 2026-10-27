@@ -1,42 +1,14 @@
-import type {
-  CrawledPageResult,
-  PageFetchClass,
-} from "@/server/lib/audit/types";
+import { MAX_HTML_BYTES, readTextUpTo } from "@/server/lib/audit/html-response";
+import { classifyFetch } from "@/server/lib/audit/classify-fetch";
+import type { CrawledPageResult } from "@/server/lib/audit/types";
+import type { RenderedPage } from "@/server/lib/audit/rendered-page";
+import type { PageFetchClass } from "@/shared/audit-fetch-class";
 import { sha256Hex } from "@/server/lib/audit/ids";
 import { normalizeUrl } from "@/server/lib/audit/url-utils";
-
-const CRAWL_USER_AGENT = "OpenSEO-Audit/1.0";
-
-/**
- * Markers of a bot-mitigation challenge page. We classify these honestly as
- * "blocked" instead of recording the challenge HTML as if it were the page.
- */
-const CHALLENGE_BODY_MARKERS = [
-  "just a moment...",
-  "challenge-platform",
-  "cf-browser-verification",
-  "attention required! | cloudflare",
-  "verifying you are human",
-];
-
-function classifyFetch(
-  statusCode: number,
-  headers: Headers,
-  bodySnippet: string,
-): PageFetchClass {
-  if (statusCode === 0) return "error";
-  if (headers.get("cf-mitigated")) return "blocked";
-  if (statusCode === 401 || statusCode === 403 || statusCode === 429) {
-    return "blocked";
-  }
-  if (statusCode === 503) {
-    const snippet = bodySnippet.toLowerCase();
-    if (CHALLENGE_BODY_MARKERS.some((marker) => snippet.includes(marker))) {
-      return "blocked";
-    }
-  }
-  return "ok";
-}
+import type { CrawlThrottle } from "@/server/lib/audit/crawl-throttle";
+import { publicFetch } from "@/server/lib/public-fetch";
+import { crawlerHeadersFor, type CrawlerAccess } from "@/shared/crawler-access";
+import { auditRequestHeaders } from "@/server/lib/audit/web-bot-auth";
 
 /** Parse `Link: <url>; rel="canonical"` response headers. */
 function parseLinkHeaderCanonical(
@@ -54,31 +26,128 @@ function parseLinkHeaderCanonical(
   return null;
 }
 
-export async function crawlPage(
-  url: string,
-  crawlDepth: number | null,
-  inSitemap: boolean,
-): Promise<CrawledPageResult> {
-  const startTime = Date.now();
-
+/**
+ * One warning per 429 so production shows what the edge answers: the
+ * Retry-After, how fast it came back (Shopify refuses at its edge within
+ * milliseconds), whether the request carried a crawler signature, and the
+ * body's first words (Shopify writes `local_rate_limited`).
+ */
+async function logRateLimited(input: {
+  url: string;
+  response: Response;
+  responseTimeMs: number;
+  attempt: number;
+  signed: boolean;
+}) {
+  const { url, response, responseTimeMs, attempt, signed } = input;
+  let body = "";
   try {
+    body = (await readTextUpTo(response.clone(), 80)).trim();
+  } catch {
+    // The snippet is only context for the log line.
+  }
+  console.warn("site_audit:rate_limited", {
+    url,
+    attempt,
+    signed,
+    responseTimeMs,
+    retryAfter: response.headers.get("retry-after"),
+    // Shopify's edge answers warm pages from Cloudflare's cache without
+    // consulting its limiter; a HIT here would mean the 429 was cached.
+    cfCacheStatus: response.headers.get("cf-cache-status"),
+    // The two ids Shopify support asks for before it looks into a refusal.
+    xRequestId: response.headers.get("x-request-id"),
+    cfRay: response.headers.get("cf-ray"),
+    body,
+  });
+}
+
+/**
+ * Fetch one URL, pausing the whole chunk and retrying once while the site
+ * 429s (see crawl-throttle.ts). `responseTimeMs` is measured from the last
+ * attempt so backoff waiting never looks like a slow server.
+ */
+async function fetchPage(
+  url: string,
+  throttle: CrawlThrottle,
+  access: CrawlerAccess | null | undefined,
+  /** Hand a 429 straight back instead of backing off. */
+  skipBackoff: boolean,
+) {
+  for (let attempt = 1; ; attempt++) {
+    if (!(await throttle.ready())) return null;
+    const startedAt = Date.now();
     // Manual redirect handling: each hop is recorded as its own page row and
     // its target is enqueued by the frontier, so redirect chains and loops are
     // detectable from the recorded rows. Trailing-slash redirects (/docs ->
     // /docs/) need no special handling: normalizeUrl preserves trailing
     // slashes, so /docs and /docs/ are distinct URLs and the redirect resolves
     // to its canonical target instead of cycling back to its own source.
-    const response = await fetch(url, {
+    const response = await publicFetch(url, {
       headers: {
-        "User-Agent": CRAWL_USER_AGENT,
         Accept: "text/html,application/xhtml+xml",
+        ...(await auditRequestHeaders(url, access)),
       },
       redirect: "manual",
       signal: AbortSignal.timeout(15_000),
     });
+    const result = {
+      response,
+      responseTimeMs: Date.now() - startedAt,
+      // A retry means an earlier attempt was 429'd; a 429 handed back after
+      // the last retry is already classified rate_limited and needs no flag.
+      rateLimited: attempt > 1,
+    };
+    if (response.status !== 429) {
+      await throttle.recovered(url);
+      return result;
+    }
+    await logRateLimited({
+      url,
+      response,
+      responseTimeMs: result.responseTimeMs,
+      attempt,
+      signed: Object.keys(crawlerHeadersFor(url, access)).length > 0,
+    });
+    if (skipBackoff) return result;
 
-    const responseTimeMs = Date.now() - startTime;
-    const statusCode = response.status;
+    const retry = await throttle.backoff(
+      url,
+      response.headers.get("retry-after"),
+    );
+    // The shared cooldown applies even when this URL has no retries left.
+    if (!retry) return result;
+    await response.body?.cancel();
+  }
+}
+
+/** Null leaves this URL deferred when the shared cooldown stops its fetch. */
+export async function crawlPage(
+  url: string,
+  crawlDepth: number | null,
+  inSitemap: boolean,
+  throttle: CrawlThrottle,
+  options: {
+    /** Crawler-access headers for the audited host, when the org has one. */
+    access?: CrawlerAccess | null;
+    render?: (url: string) => Promise<RenderedPage>;
+    /**
+     * Shopify's edge throttles Cloudflare Workers before the store sees the
+     * request, and waiting rarely helps. A rendered audit of a Shopify store
+     * reads a throttled page through the renderer instead of backing off.
+     */
+    renderThrottled?: boolean;
+  } = {},
+): Promise<CrawledPageResult | null> {
+  const { access, render } = options;
+  const renderThrottled = Boolean(render && options.renderThrottled);
+  const startTime = Date.now();
+
+  try {
+    const fetched = await fetchPage(url, throttle, access, renderThrottled);
+    if (!fetched) return null;
+    const { response, responseTimeMs, rateLimited } = fetched;
+    let statusCode = response.status;
     const xRobotsTag = response.headers.get("x-robots-tag");
     const headerCanonicalUrl = parseLinkHeaderCanonical(
       response.headers.get("link"),
@@ -98,17 +167,52 @@ export async function crawlPage(
         headerCanonicalUrl,
         crawlDepth,
         inSitemap,
+        rateLimited,
       });
     }
 
     const contentType = response.headers.get("content-type") ?? "";
-    const isHtml = contentType.includes("text/html");
-    const body = isHtml ? await response.text() : "";
-    const fetchClass = classifyFetch(
+    let isHtml = contentType.includes("text/html");
+    // Cap what we read: the first 1 MiB still contains the SEO metadata and
+    // navigation needed by the audit in normal documents.
+    let body = isHtml ? await readTextUpTo(response, MAX_HTML_BYTES) : "";
+    let fetchClass = classifyFetch(
       statusCode,
-      response.headers,
+      Boolean(response.headers.get("cf-mitigated")),
       body.slice(0, 4_000),
     );
+
+    // Rendering replaces the body of a readable HTML page, a bot challenge, or
+    // a throttled Shopify page with what the browser loaded. Redirects,
+    // non-HTML files, origin errors, login walls and other rate limits keep
+    // their existing paths. The direct response's timing and headers stay
+    // authoritative.
+    const challenged = fetchClass === "blocked" && statusCode !== 401;
+    const throttled = renderThrottled && statusCode === 429;
+    if (
+      render &&
+      (throttled ||
+        (isHtml && (challenged || (fetchClass === "ok" && statusCode < 400))))
+    ) {
+      try {
+        const page = await render(url);
+        body = page.html;
+        isHtml = true;
+        // A challenge's or a 429's status was never the page's. Browser Run
+        // reports the status it loaded; Context returns only pages that loaded.
+        if (challenged || throttled) statusCode = page.status ?? 200;
+        // The renderer can be challenged where the direct fetch was not.
+        fetchClass = classifyFetch(statusCode, false, body.slice(0, 4_000));
+      } catch (error) {
+        // A challenge that neither renderer passed stays blocked.
+        if (!challenged && !throttled) throw error;
+        // A throttled page neither renderer read is given up on as rate
+        // limited, which pauses or stops the crawl like any other refusal.
+        if (throttled) {
+          await throttle.refuse(url, response.headers.get("retry-after"));
+        }
+      }
+    }
 
     if (!isHtml || fetchClass !== "ok" || statusCode >= 400) {
       return emptyPageResult({
@@ -121,15 +225,22 @@ export async function crawlPage(
         headerCanonicalUrl,
         crawlDepth,
         inSitemap,
+        // The body was still fetched and buffered; report its size so the
+        // crawl window's byte budget sees blocked/error pages too.
+        htmlBytes: body.length,
+        rateLimited,
       });
     }
 
-    // Dynamic import keeps cheerio (page-analyzer's HTML parser) out of the
-    // worker's startup module graph: SiteAuditWorkflow is re-exported from
-    // src/server.ts, so a static import would evaluate cheerio in every
-    // isolate's baseline heap, not just when an audit actually crawls.
+    // Dynamic import keeps the HTML parser out of the worker's startup
+    // module graph: SiteAuditWorkflow is re-exported from src/server.ts, so
+    // a static import would evaluate it in every isolate's baseline heap,
+    // not just when an audit actually crawls.
     const { analyzeHtml } = await import("@/server/lib/audit/page-analyzer");
     const analysis = analyzeHtml(body, url, statusCode, responseTimeMs);
+    // Rendered HTML can still be the loading shell (a weak render), so the
+    // same check applies whether or not the page was rendered.
+    const javascriptShell = analysis.javascriptShell === true;
     const robotsDirectives = [analysis.robotsMeta, xRobotsTag]
       .filter(Boolean)
       .join(",")
@@ -138,7 +249,10 @@ export async function crawlPage(
     const headingCount = (level: number) =>
       analysis.headingOrder.filter((h) => h === level).length;
 
-    return {
+    // Parser strings can be V8 slices backed by the entire HTML body. Detach
+    // the finished result before persistence queues retain it: otherwise a
+    // few KB of metadata can keep ~2 MiB of decoded HTML alive per page.
+    return structuredClone({
       id: crypto.randomUUID(),
       url,
       statusCode,
@@ -163,10 +277,14 @@ export async function crawlPage(
       h6Count: headingCount(6),
       headingOrder: analysis.headingOrder,
       wordCount: analysis.wordCount,
-      contentHash: analysis.bodyText
-        ? await sha256Hex(analysis.bodyText)
-        : null,
+      contentHash:
+        analysis.bodyText && !javascriptShell
+          ? await sha256Hex(analysis.bodyText)
+          : null,
       isHtml: true,
+      javascriptShell,
+      htmlBytes: body.length,
+      rateLimited,
       imagesTotal: analysis.images.length,
       // Only a truly absent alt attribute counts: alt="" is the correct
       // markup for decorative images.
@@ -180,8 +298,11 @@ export async function crawlPage(
       responseTimeMs,
       crawlDepth,
       inSitemap,
-    };
+    });
   } catch (error) {
+    // Losing a durable cooldown must fail the workflow, not become a page
+    // error that lets the scheduler continue making requests.
+    if (throttle.checkpointFailed) throw error;
     const responseTimeMs = Date.now() - startTime;
     console.warn(`Failed to crawl ${url}:`, error);
     return emptyPageResult({
@@ -208,6 +329,8 @@ function emptyPageResult(input: {
   headerCanonicalUrl: string | null;
   crawlDepth: number | null;
   inSitemap: boolean;
+  htmlBytes?: number;
+  rateLimited?: boolean;
 }): CrawledPageResult {
   return {
     id: crypto.randomUUID(),
@@ -234,6 +357,8 @@ function emptyPageResult(input: {
     wordCount: 0,
     contentHash: null,
     isHtml: false,
+    htmlBytes: input.htmlBytes ?? 0,
+    rateLimited: input.rateLimited ?? false,
     imagesTotal: 0,
     imagesMissingAlt: 0,
     images: [],

@@ -2,11 +2,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { waitUntil } from "cloudflare:workers";
 import { RankTrackingRepository } from "@/server/features/rank-tracking/repositories/RankTrackingRepository";
 import { RankTrackingService } from "@/server/features/rank-tracking/services/RankTrackingService";
+import { RankTrackingKeywordService } from "@/server/features/rank-tracking/services/RankTrackingKeywordService";
 import { getLatestResults } from "@/server/features/rank-tracking/services/rankTrackingResults";
 import { AppError, asAppError } from "@/server/lib/errors";
-import { isHostedServerAuthMode } from "@/server/lib/runtime-env";
-import { customerHasPaidPlan } from "@/server/billing/subscription";
 import { captureServerEvent } from "@/server/lib/posthog";
+import { markOnboardingMilestone } from "@/server/email/onboarding-drip";
 import { requireProjectContext } from "@/serverFunctions/middleware";
 import {
   getConfigsSchema,
@@ -18,6 +18,7 @@ import {
   estimateCostSchema,
   addKeywordsSchema,
   removeKeywordsSchema,
+  setKeywordsPinnedSchema,
   refreshMetricsSchema,
   getKeywordHistorySchema,
   getConfigTrendSchema,
@@ -37,6 +38,7 @@ interface RankConfigTrendPoint {
   top4to10: number;
   top11to20: number;
   notRanking: number;
+  notChecked: number;
 }
 
 export interface RankPositionMatrixCell {
@@ -85,8 +87,18 @@ export const createRankTrackingConfig = createServerFn({ method: "POST" })
       devices: data.devices,
       serpDepth: data.serpDepth,
       scheduleInterval: data.scheduleInterval,
+      scheduleTime: data.scheduleTime,
     });
 
+    // Re-adding an archived domain keeps its keywords, and the keyword step
+    // then adds nothing new — so this is the only place its check can start.
+    await runAutoCheck({
+      configId: result.id,
+      projectId: context.projectId,
+      billingCustomer: context,
+    });
+
+    await markOnboardingMilestone(context, "rankTrackingSetUp");
     waitUntil(
       captureServerEvent({
         distinctId: context.userId,
@@ -94,7 +106,6 @@ export const createRankTrackingConfig = createServerFn({ method: "POST" })
         organizationId: context.organizationId,
         properties: {
           project_id: context.projectId,
-          domain: data.domain,
           devices: data.devices ?? "both",
           schedule: data.scheduleInterval ?? "weekly",
         },
@@ -116,6 +127,7 @@ export const updateRankTrackingConfig = createServerFn({ method: "POST" })
       devices: data.devices,
       serpDepth: data.serpDepth,
       scheduleInterval: data.scheduleInterval,
+      scheduleTime: data.scheduleTime,
       isActive: data.isActive,
     });
     return { success: true };
@@ -125,14 +137,6 @@ export const triggerRankCheck = createServerFn({ method: "POST" })
   .middleware(requireProjectContext)
   .validator(triggerCheckSchema)
   .handler(async ({ data, context }) => {
-    const isHosted = await isHostedServerAuthMode();
-    if (isHosted && !(await customerHasPaidPlan(context.organizationId))) {
-      throw new AppError(
-        "PAYMENT_REQUIRED",
-        "Upgrade to the paid plan to run rank checks",
-      );
-    }
-
     const result = await RankTrackingService.triggerCheck({
       configId: data.configId,
       projectId: context.projectId,
@@ -183,6 +187,32 @@ export const estimateRankCheckCost = createServerFn({ method: "POST" })
     return RankTrackingService.estimateCost(data.configId, context.projectId);
   });
 
+function logAutoActionFailure(action: string, err: unknown) {
+  const appErr = asAppError(err);
+  if (appErr?.code === "PAYMENT_REQUIRED") {
+    console.info(`[rank-tracking] ${action} skipped: paid plan required`);
+  } else if (appErr?.code === "INSUFFICIENT_CREDITS") {
+    console.info(`[rank-tracking] ${action} skipped: insufficient credits`);
+  } else {
+    console.error(`[rank-tracking] ${action} failed:`, err);
+  }
+}
+
+async function runAutoCheck(
+  input: Parameters<typeof RankTrackingService.triggerAutoCheck>[0],
+) {
+  try {
+    const result = await RankTrackingService.triggerAutoCheck(input);
+    if (!result.ok && result.reason !== "no_keywords") {
+      console.info("[rank-tracking] auto-check skipped: %s", result.reason);
+    }
+    return result;
+  } catch (err) {
+    logAutoActionFailure("auto-check", err);
+    return null;
+  }
+}
+
 export const addTrackingKeywords = createServerFn({ method: "POST" })
   .middleware(requireProjectContext)
   .validator(addKeywordsSchema)
@@ -191,44 +221,19 @@ export const addTrackingKeywords = createServerFn({ method: "POST" })
       data.configId,
       context.projectId,
       data.keywords,
+      { kind: "direct_user_action" },
+      data.matchCase,
     );
 
-    let checkTriggered = false;
-    if (result.addedIds.length > 0) {
-      const isHosted = await isHostedServerAuthMode();
-      const hasPaidPlan =
-        !isHosted || (await customerHasPaidPlan(context.organizationId));
-
-      if (hasPaidPlan) {
-        try {
-          const triggerResult = await RankTrackingService.triggerCheck({
+    const autoCheck =
+      result.addedIds.length > 0
+        ? await runAutoCheck({
             configId: data.configId,
             projectId: context.projectId,
             billingCustomer: context,
             keywordIds: result.addedIds,
-          });
-          checkTriggered = triggerResult.ok;
-          if (!triggerResult.ok) {
-            console.info(
-              "[rank-tracking] auto-check skipped: %s",
-              triggerResult.reason,
-            );
-          }
-        } catch (err) {
-          const appErr = asAppError(err);
-          if (appErr?.code === "INSUFFICIENT_CREDITS") {
-            console.info(
-              "[rank-tracking] auto-check skipped: insufficient credits",
-            );
-          } else {
-            console.error(
-              "[rank-tracking] auto-check after keyword add failed:",
-              err,
-            );
-          }
-        }
-      }
-    }
+          })
+        : null;
 
     // Fetch keyword metrics (awaited so they're in the DB before client re-fetches)
     if (result.added > 0) {
@@ -239,30 +244,39 @@ export const addTrackingKeywords = createServerFn({ method: "POST" })
           context,
         );
       } catch (err) {
-        const appErr = asAppError(err);
-        if (appErr?.code === "INSUFFICIENT_CREDITS") {
-          console.info(
-            "[rank-tracking] auto-metrics-refresh skipped: insufficient credits",
-          );
-        } else {
-          console.error("[rank-tracking] auto-metrics-refresh failed:", err);
-        }
+        logAutoActionFailure("auto-metrics-refresh", err);
       }
     }
 
-    return { ...result, checkTriggered };
+    return {
+      ...result,
+      checkTriggered: autoCheck?.ok ?? false,
+      checkScheduledSoon:
+        autoCheck?.ok === false && autoCheck.reason === "scheduled_soon",
+    };
   });
 
 export const removeTrackingKeywords = createServerFn({ method: "POST" })
   .middleware(requireProjectContext)
   .validator(removeKeywordsSchema)
   .handler(async ({ data, context }) => {
-    await RankTrackingService.removeKeywords(
+    return RankTrackingService.removeKeywords(
       data.configId,
       context.projectId,
       data.keywordIds,
     );
-    return { removed: data.keywordIds.length };
+  });
+
+export const setTrackingKeywordsPinned = createServerFn({ method: "POST" })
+  .middleware(requireProjectContext)
+  .validator(setKeywordsPinnedSchema)
+  .handler(async ({ data, context }) => {
+    return RankTrackingKeywordService.setKeywordsPinned(
+      data.configId,
+      context.projectId,
+      data.keywordIds,
+      data.pinned,
+    );
   });
 
 export const refreshTrackingKeywordMetrics = createServerFn({ method: "POST" })
@@ -314,7 +328,9 @@ export const getRankConfigTrend = createServerFn({ method: "POST" })
       data.sinceDays,
     );
     // SQLite sum()/count() can return strings; coerce and derive "not ranking"
-    // (position > 20 or null) as the remainder so the buckets cover every kw.
+    // (position > 20 or null) as the remainder of the checked keywords, and
+    // "not checked" (the check failed, so no row) as the remainder of the
+    // run's keywords, so the buckets cover every tracked keyword.
     return rows.map((row) => {
       const top3 = Number(row.top3) || 0;
       const top4to10 = Number(row.top4to10) || 0;
@@ -327,6 +343,7 @@ export const getRankConfigTrend = createServerFn({ method: "POST" })
         top4to10,
         top11to20,
         notRanking: Math.max(0, total - top3 - top4to10 - top11to20),
+        notChecked: Math.max(0, row.keywordsTotal - total),
       };
     });
   });

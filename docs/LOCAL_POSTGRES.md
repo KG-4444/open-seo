@@ -43,7 +43,7 @@ postgres://openseo:openseo@localhost:5433/openseo
 ## 2. Apply the Postgres migrations
 
 The Postgres schema is hand-written (it is the one structural artifact
-`db:generate` does not regenerate) and migrations live in `drizzle-pg/`. Apply
+`db:generate` does not regenerate) and migrations live in `drizzle/pg/`. Apply
 them with `POSTGRES_DATABASE_URL` set — `drizzle-kit` reads it from the shell
 environment:
 
@@ -62,12 +62,12 @@ provider flag there (not just in your shell):
 DATABASE_PROVIDER=postgres
 ```
 
-The connection string comes from the `HYPERDRIVE` binding: in local dev,
-miniflare resolves it to the `localConnectionString` committed in
-`wrangler.jsonc`, which already points at the Docker container from step 1.
-(In deployed Workers the same binding resolves to real Hyperdrive — the app
-never connects to Postgres except through this binding.) If your local Postgres
-lives elsewhere, override without touching the config:
+The connection string comes from the `HYPERDRIVE` binding. The `hyperdrive`
+block in `wrangler.jsonc` ships commented out, so uncomment it first. Miniflare then resolves the binding to its
+`localConnectionString`, which already points at the Docker container from
+step 1. (In deployed Workers the same binding resolves to real Hyperdrive —
+the app never connects to Postgres except through this binding.) If your local
+Postgres lives elsewhere, override without touching the config:
 
 ```sh
 CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgres://... pnpm dev
@@ -107,7 +107,7 @@ When you change a table, update **both** dialects:
 tables, columns, nullability, primary keys, unique/partial indexes, or FK
 `onDelete`). It compares the schema definitions, **not** the generated
 migrations — so after editing the Postgres schema, always run `pnpm db:generate:pg`
-and commit the new `drizzle-pg/` migration, or a Postgres deploy will be missing
+and commit the new `drizzle/pg/` migration, or a Postgres deploy will be missing
 the change even though the parity test is green.
 
 ## Teardown

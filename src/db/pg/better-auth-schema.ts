@@ -1,7 +1,8 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   index,
+  integer,
   pgTable,
   text,
   timestamp,
@@ -23,6 +24,14 @@ export const user = pgTable("user", {
     .$onUpdate(() => /* @__PURE__ */ new Date())
     .notNull(),
   analyticsOptedOut: boolean("analytics_opted_out"),
+  termsAcceptedVersion: text("terms_accepted_version"),
+  termsAcceptedAt: timestampColumn("terms_accepted_at"),
+  productUpdatesOptIn: boolean("product_updates_opt_in"),
+  productUpdatesChangedAt: timestampColumn("product_updates_changed_at"),
+  // The org this user last worked in; seeds session.activeOrganizationId at
+  // sign-in (validated against a live membership first). Not a FK: an org
+  // delete must not fail because a user's last-active pointer references it.
+  lastActiveOrganizationId: text("last_active_organization_id"),
 });
 
 export const session = pgTable(
@@ -74,6 +83,11 @@ export const account = pgTable(
       table.accountId,
       table.providerId,
     ),
+    uniqueIndex("account_google_grant_owner_idx")
+      .on(table.userId, table.providerId, table.accountId)
+      .where(
+        sql`${table.providerId} in ('google-search-console', 'google-analytics')`,
+      ),
   ],
 );
 
@@ -127,6 +141,10 @@ export const member = pgTable(
   (table) => [
     index("member_organizationId_idx").on(table.organizationId),
     index("member_userId_idx").on(table.userId),
+    uniqueIndex("member_organizationId_userId_uidx").on(
+      table.organizationId,
+      table.userId,
+    ),
   ],
 );
 
@@ -149,6 +167,39 @@ export const invitation = pgTable(
   (table) => [
     index("invitation_organizationId_idx").on(table.organizationId),
     index("invitation_email_idx").on(table.email),
+  ],
+);
+
+export const apikey = pgTable(
+  "apikey",
+  {
+    id: text("id").primaryKey(),
+    configId: text("config_id").default("default").notNull(),
+    name: text("name"),
+    start: text("start"),
+    prefix: text("prefix"),
+    key: text("key").notNull(),
+    referenceId: text("reference_id").notNull(),
+    refillInterval: integer("refill_interval"),
+    refillAmount: integer("refill_amount"),
+    lastRefillAt: timestampColumn("last_refill_at"),
+    enabled: boolean("enabled").default(true),
+    rateLimitEnabled: boolean("rate_limit_enabled").default(true),
+    rateLimitTimeWindow: integer("rate_limit_time_window").default(60000),
+    rateLimitMax: integer("rate_limit_max").default(120),
+    requestCount: integer("request_count").default(0),
+    remaining: integer("remaining"),
+    lastRequest: timestampColumn("last_request"),
+    expiresAt: timestampColumn("expires_at"),
+    createdAt: timestampColumn("created_at").notNull(),
+    updatedAt: timestampColumn("updated_at").notNull(),
+    permissions: text("permissions"),
+    metadata: text("metadata"),
+  },
+  (table) => [
+    index("apikey_configId_idx").on(table.configId),
+    index("apikey_referenceId_idx").on(table.referenceId),
+    index("apikey_key_idx").on(table.key),
   ],
 );
 

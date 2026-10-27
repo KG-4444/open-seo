@@ -3,8 +3,11 @@ import { z } from "zod";
 import type { BillingCustomerContext } from "@/server/billing/subscription";
 import { createDataforseoClient } from "@/server/lib/dataforseo";
 import { buildCacheKey, getCached, setCached } from "@/server/lib/r2-cache";
-import { normalizeDomainInput } from "@/server/lib/domainUtils";
+import { parseResearchTargetOrThrow } from "@/server/lib/domainUtils";
+import { buildRankedKeywordsScopeFilter } from "@/server/lib/dataforseo/researchScopeFilters";
+import type { ResearchScope } from "@/shared/researchScope";
 import { mapKeywordItem } from "@/server/features/domain/services/domainKeywordMapper";
+import { computeHasMore } from "@/server/features/domain/services/pagination";
 import {
   buildKeywordFilters,
   buildOrderBy,
@@ -42,7 +45,7 @@ export async function getKeywordsPage(
   input: {
     projectId: string;
     domain: string;
-    includeSubdomains: boolean;
+    scope?: ResearchScope;
     locationCode: number;
     languageCode: string;
     page: number;
@@ -54,16 +57,18 @@ export async function getKeywordsPage(
   },
   billingCustomer: BillingCustomerContext,
 ): Promise<DomainKeywordsPageResult> {
-  const domain = normalizeDomainInput(input.domain, input.includeSubdomains);
+  const target = parseResearchTargetOrThrow(input.domain, input.scope);
+  const scopeFilter = buildRankedKeywordsScopeFilter(target);
   const offset = (input.page - 1) * input.pageSize;
   const orderBy = buildOrderBy(input.sortMode, input.sortOrder);
-  const filters = buildKeywordFilters(input.filters, input.search);
+  const filters = buildKeywordFilters(input.filters, input.search, scopeFilter);
 
   const cacheKey = await buildCacheKey("domain:keywords-page", {
     organizationId: billingCustomer.organizationId,
     projectId: input.projectId,
-    domain,
-    includeSubdomains: input.includeSubdomains,
+    domain: target.hostname,
+    scope: target.scope,
+    path: target.path,
     locationCode: input.locationCode,
     languageCode: input.languageCode,
     page: input.page,
@@ -82,7 +87,7 @@ export async function getKeywordsPage(
 
   const dataforseo = createDataforseoClient(billingCustomer);
   const response = await dataforseo.domain.rankedKeywords({
-    target: domain,
+    target: target.hostname,
     locationCode: input.locationCode,
     languageCode: input.languageCode,
     limit: input.pageSize,
@@ -99,13 +104,15 @@ export async function getKeywordsPage(
     );
 
   const totalCount = response.totalCount;
-  const hasMore =
-    totalCount != null
-      ? offset + keywords.length < totalCount
-      : keywords.length === input.pageSize;
+  const hasMore = computeHasMore(
+    offset,
+    response.items.length,
+    totalCount,
+    input.pageSize,
+  );
 
   const result: DomainKeywordsPageResult = {
-    domain,
+    domain: target.hostname,
     page: input.page,
     pageSize: input.pageSize,
     totalCount,

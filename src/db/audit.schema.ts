@@ -6,6 +6,7 @@ import {
   index,
 } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
+import { PAGE_FETCH_CLASSES } from "@/shared/audit-fetch-class";
 import { projects } from "./app.schema";
 
 // ============================================================================
@@ -37,6 +38,13 @@ export const audits = sqliteTable(
     lighthouseCompleted: integer("lighthouse_completed").notNull().default(0),
     lighthouseFailed: integer("lighthouse_failed").notNull().default(0),
     currentPhase: text("current_phase").default("discovery"),
+    // Failure diagnostics; null unless status = "failed". errorCode is a
+    // closed vocabulary (see classifyAuditError) so failures are aggregable;
+    // errorDetail is the raw message, truncated. failedPhase records which
+    // currentPhase the audit was in when it died.
+    errorCode: text("error_code"),
+    errorDetail: text("error_detail"),
+    failedPhase: text("failed_phase"),
     startedAt: text("started_at")
       .notNull()
       .default(sql`(current_timestamp)`),
@@ -75,13 +83,11 @@ export const auditPages = sqliteTable(
     h4Count: integer("h4_count").notNull().default(0),
     h5Count: integer("h5_count").notNull().default(0),
     h6Count: integer("h6_count").notNull().default(0),
-    headingOrderJson: text("heading_order_json"),
     // Content
     wordCount: integer("word_count").notNull().default(0),
     // Images
     imagesTotal: integer("images_total").notNull().default(0),
     imagesMissingAlt: integer("images_missing_alt").notNull().default(0),
-    imagesJson: text("images_json"),
     // Links
     internalLinkCount: integer("internal_link_count").notNull().default(0),
     externalLinkCount: integer("external_link_count").notNull().default(0),
@@ -89,8 +95,6 @@ export const auditPages = sqliteTable(
     hasStructuredData: integer("has_structured_data", { mode: "boolean" })
       .notNull()
       .default(false),
-    // Hreflang
-    hreflangTagsJson: text("hreflang_tags_json"),
     // Indexability
     isIndexable: integer("is_indexable", { mode: "boolean" })
       .notNull()
@@ -106,8 +110,7 @@ export const auditPages = sqliteTable(
       .default(false),
     // SHA-256 of the visible body text, for duplicate-content grouping
     contentHash: text("content_hash"),
-    // How the fetch resolved: ok | blocked (WAF/bot challenge) | error
-    fetchClass: text("fetch_class", { enum: ["ok", "blocked", "error"] })
+    fetchClass: text("fetch_class", { enum: PAGE_FETCH_CLASSES })
       .notNull()
       .default("ok"),
     // Performance
@@ -116,36 +119,8 @@ export const auditPages = sqliteTable(
   (table) => [index("audit_pages_audit_url_idx").on(table.auditId, table.url)],
 );
 
-// One row per unique (source page, target URL) link edge. Currently only
-// internal edges are stored (see AuditRepository); isInternal stays so
-// external-link checks can start writing rows without a migration.
-export const auditLinks = sqliteTable(
-  "audit_links",
-  {
-    id: text("id").primaryKey(),
-    auditId: text("audit_id")
-      .notNull()
-      .references(() => audits.id, { onDelete: "cascade" }),
-    sourcePageId: text("source_page_id")
-      .notNull()
-      .references(() => auditPages.id, { onDelete: "cascade" }),
-    sourceUrl: text("source_url").notNull(),
-    targetUrl: text("target_url").notNull(),
-    anchor: text("anchor"),
-    isInternal: integer("is_internal", { mode: "boolean" })
-      .notNull()
-      .default(true),
-    isNofollow: integer("is_nofollow", { mode: "boolean" })
-      .notNull()
-      .default(false),
-  },
-  (table) => [
-    index("audit_links_audit_target_idx").on(table.auditId, table.targetUrl),
-    // Cascade path from audit_pages deletes; without this every page delete
-    // seq-scans the (large) links table.
-    index("audit_links_source_page_id_idx").on(table.sourcePageId),
-  ],
-);
+// Link edges live in the per-audit AuditScratchpad Durable Object for the
+// duration of the crawl; they are never persisted to the app DB.
 
 // One row per (issue type, affected page)
 export const auditIssues = sqliteTable(

@@ -2,10 +2,11 @@ import type {
   ArchiveProjectInput,
   CreateProjectInput,
   RestoreProjectInput,
-  SetProjectMarketInput,
+  SetProjectWebsiteInput,
   UpdateProjectInput,
 } from "@/types/schemas/projects";
 import { ProjectRepository } from "@/server/features/projects/repositories/ProjectRepository";
+import { normalizeBacklinksTarget } from "@/server/lib/dataforseoBacklinksTarget";
 import { AppError } from "@/server/lib/errors";
 import { assertLanguageForLocation } from "@/server/lib/market";
 import { getLanguageCode } from "@/shared/keyword-locations";
@@ -46,6 +47,15 @@ function resolveMarketInput(input: {
   return { locationCode, languageCode };
 }
 
+// Drizzle wraps the driver error in a "Failed query" error, so check the cause
+// chain. SQLite reports the violation in the message, Postgres as code 23505.
+function isUniqueViolation(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.message.includes("UNIQUE constraint failed")) return true;
+  if ("code" in error && error.code === "23505") return true;
+  return isUniqueViolation(error.cause);
+}
+
 // The projects table's only unique index guards the auto-created ("Default",
 // null) singleton. A UNIQUE violation while writing exactly that name/domain
 // therefore means one already exists — gating on the input (not just the error
@@ -54,12 +64,7 @@ function isReservedDefaultConflict(
   error: unknown,
   input: { name: string; domain?: string },
 ) {
-  return (
-    input.name === "Default" &&
-    !input.domain &&
-    error instanceof Error &&
-    error.message.includes("UNIQUE constraint failed")
-  );
+  return input.name === "Default" && !input.domain && isUniqueViolation(error);
 }
 
 const RESERVED_DEFAULT_MESSAGE =
@@ -83,6 +88,24 @@ export async function listProjectsEnsuringOne(organizationId: string) {
   return listProjects(organizationId);
 }
 
+/**
+ * Validates and canonicalizes a project domain (lowercase bare host, www and
+ * protocol/path stripped) with the same rules the backlink fetch will apply
+ * later, so junk fails at save time instead of at the first paid call.
+ * Undefined passes through — updateProject uses that to clear the domain.
+ */
+function normalizeProjectDomain(domain: string | undefined) {
+  if (domain === undefined) return undefined;
+  try {
+    return normalizeBacklinksTarget(domain, { scope: "domain" }).apiTarget;
+  } catch {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "Enter a valid domain, like acme.com.",
+    );
+  }
+}
+
 export async function createProject(
   organizationId: string,
   input: CreateProjectInput,
@@ -91,7 +114,7 @@ export async function createProject(
     const row = await ProjectRepository.createProject(
       organizationId,
       input.name,
-      input.domain,
+      normalizeProjectDomain(input.domain),
       resolveMarketInput(input),
     );
     return mapProject(row);
@@ -113,7 +136,7 @@ export async function updateProject(
       organizationId,
       {
         name: input.name,
-        domain: input.domain,
+        domain: normalizeProjectDomain(input.domain),
         market: resolveMarketInput(input),
       },
     );
@@ -124,24 +147,6 @@ export async function updateProject(
     }
     throw error;
   }
-}
-
-/**
- * Sets a project's default market on its own, for surfaces that only ask for
- * the market (onboarding). Writing just these two columns keeps the write from
- * echoing a name/domain the caller never edited.
- */
-export async function setProjectMarket(
-  organizationId: string,
-  input: SetProjectMarketInput,
-) {
-  assertLanguageForLocation(input.locationCode, input.languageCode);
-  const row = await ProjectRepository.updateProjectMarket(
-    input.projectId,
-    organizationId,
-    { locationCode: input.locationCode, languageCode: input.languageCode },
-  );
-  return mapProject(row);
 }
 
 export async function archiveProject(
@@ -175,10 +180,7 @@ export async function restoreProject(
     // The Default singleton index is the only unique index on projects, and
     // restore only writes archived_at — so a UNIQUE failure can only mean an
     // active Default/no-domain project already exists.
-    if (
-      error instanceof Error &&
-      error.message.includes("UNIQUE constraint failed")
-    ) {
+    if (isUniqueViolation(error)) {
       throw new AppError(
         "CONFLICT",
         'An active project named "Default" with no domain already exists. Rename it first, then restore this one.',
@@ -202,4 +204,20 @@ export async function getProjectForOrganization(
   }
 
   return mapProject(project);
+}
+
+export async function setProjectWebsite(
+  organizationId: string,
+  input: SetProjectWebsiteInput,
+) {
+  const domain = normalizeProjectDomain(input.domain);
+  if (!domain) throw new AppError("VALIDATION_ERROR", "Enter a valid domain.");
+  assertLanguageForLocation(input.locationCode, input.languageCode);
+  const row = await ProjectRepository.updateProjectWebsite(
+    input.projectId,
+    organizationId,
+    domain,
+    { locationCode: input.locationCode, languageCode: input.languageCode },
+  );
+  return mapProject(row);
 }

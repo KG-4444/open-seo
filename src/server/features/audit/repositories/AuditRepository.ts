@@ -1,19 +1,20 @@
 /**
  * Data access layer for site audit tables.
  * Provider-aware (D1 or Postgres) via the `@/db` handle. Covers audits,
- * audit_pages, audit_links, audit_issues, and stored Lighthouse results.
+ * audit_pages, audit_issues, and stored Lighthouse results. Link edges live
+ * in the per-audit scratchpad Durable Object, not here.
  */
-import { and, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import {
   audits,
   auditIssues,
   auditLighthouseResults,
-  auditLinks,
   auditPages,
+  projects,
 } from "@/db/schema";
 import { executeInBatches } from "@/db/runBatch";
-import { AUDIT_ISSUE_TYPES } from "@/shared/audit-issues";
+import { insertIssues } from "./auditIssueWrites";
 import { deterministicAuditRowId } from "@/server/lib/audit/ids";
 import type { DetectedIssue } from "@/server/lib/audit/issues/page-reporters";
 import type {
@@ -21,13 +22,7 @@ import type {
   CrawledPageResult,
   LighthouseResult,
 } from "@/server/lib/audit/types";
-
-// Only internal links are stored: both consumers (broken-internal-link and
-// orphan checks) filter on isInternal, and per-page external counts already
-// live on audit_pages. External rows come back when P1 adds external-link
-// checks. Mega-menu/footer-heavy sites can carry 1000+ links per page; cap
-// what we store so a 10k-page crawl can't write tens of millions of link rows.
-const MAX_STORED_LINKS_PER_PAGE = 500;
+import type { PageFetchClass } from "@/shared/audit-fetch-class";
 
 async function createAudit(data: {
   id: string;
@@ -51,6 +46,18 @@ async function createAudit(data: {
     lighthouseTotal: data.lighthouseTotal,
     currentPhase: "discovery",
   });
+}
+
+/** Records where the crawl really starts, once the workflow has probed the site. */
+async function updateAuditStart(
+  auditId: string,
+  startUrl: string,
+  config: AuditConfig,
+) {
+  await db
+    .update(audits)
+    .set({ startUrl, config: JSON.stringify(config) })
+    .where(eq(audits.id, auditId));
 }
 
 async function updateAuditProgress(
@@ -100,7 +107,15 @@ async function completeAudit(
     );
 }
 
-async function failAudit(auditId: string, workflowInstanceId: string) {
+async function failAudit(
+  auditId: string,
+  workflowInstanceId: string,
+  errorInfo?: {
+    errorCode: string;
+    errorDetail: string;
+    failedPhase: string | null;
+  },
+) {
   // Only a running audit can transition to failed: the getStatus reconciler
   // races the workflow's own finalize, and without this guard it could flip
   // a just-completed audit to failed.
@@ -110,6 +125,11 @@ async function failAudit(auditId: string, workflowInstanceId: string) {
       status: "failed",
       completedAt: new Date().toISOString(),
       currentPhase: "failed",
+      ...(errorInfo && {
+        errorCode: errorInfo.errorCode,
+        errorDetail: errorInfo.errorDetail,
+        failedPhase: errorInfo.failedPhase,
+      }),
     })
     .where(
       and(
@@ -133,15 +153,15 @@ async function getAuditForWorkflow(
 }
 
 /**
- * Persist one crawl batch (pages + link edges + per-page issues).
- * Called inside the crawl-batch Workflow step so results land in D1
- * incrementally instead of accumulating in memory until finalize.
+ * Persist one crawled sub-batch (pages + per-page issues). Called inside the
+ * crawl-chunk Workflow step so results land in the app DB incrementally
+ * instead of accumulating in memory until finalize. Link edges go to the
+ * audit's scratchpad DO, not here.
  *
  * Idempotent on step retry: callers assign deterministic page ids
- * (deterministicAuditRowId) and link/issue ids are derived from stable
- * content. Page rows upsert (a retried fetch may legitimately differ — last
- * attempt wins, matching what the step returns); links and issues are
- * insert-or-ignore.
+ * (deterministicAuditRowId) and issue ids are derived from stable content.
+ * Page rows upsert (a retried fetch may legitimately differ — last attempt
+ * wins); issues are insert-or-ignore.
  */
 async function insertCrawledBatch(
   auditId: string,
@@ -168,16 +188,13 @@ async function insertCrawledBatch(
       h4Count: page.h4Count,
       h5Count: page.h5Count,
       h6Count: page.h6Count,
-      headingOrderJson: JSON.stringify(page.headingOrder),
       wordCount: page.wordCount,
       contentHash: page.contentHash,
       imagesTotal: page.imagesTotal,
       imagesMissingAlt: page.imagesMissingAlt,
-      imagesJson: JSON.stringify(page.images),
       internalLinkCount: page.links.filter((l) => l.isInternal).length,
       externalLinkCount: page.links.filter((l) => !l.isInternal).length,
       hasStructuredData: page.hasStructuredData,
-      hreflangTagsJson: JSON.stringify(page.hreflangTags),
       isIndexable: page.isIndexable,
       fetchClass: page.fetchClass,
       crawlDepth: page.crawlDepth,
@@ -190,50 +207,7 @@ async function insertCrawledBatch(
       .onConflictDoUpdate({ target: auditPages.id, set: dataColumns });
   });
 
-  const linkRows = await Promise.all(
-    pages.flatMap((page) =>
-      page.links
-        .filter((link) => link.isInternal)
-        .slice(0, MAX_STORED_LINKS_PER_PAGE)
-        .map(async (link) => ({
-          id: await deterministicAuditRowId(auditId, page.url, link.targetUrl),
-          auditId,
-          sourcePageId: page.id,
-          sourceUrl: page.url,
-          targetUrl: link.targetUrl,
-          anchor: link.anchor,
-          isInternal: link.isInternal,
-          isNofollow: link.isNofollow,
-        })),
-    ),
-  );
-  await executeInBatches(linkRows, (tx, row) =>
-    tx.insert(auditLinks).values(row).onConflictDoNothing(),
-  );
-
   await insertIssues(auditId, issues);
-}
-
-async function insertIssues(auditId: string, issues: DetectedIssue[]) {
-  const issueRows = await Promise.all(
-    issues.map(async (issue) => ({
-      id: await deterministicAuditRowId(
-        auditId,
-        issue.pageUrl,
-        issue.issueType,
-        issue.dedupeKey ?? "",
-      ),
-      auditId,
-      pageId: issue.pageId,
-      pageUrl: issue.pageUrl,
-      issueType: issue.issueType,
-      severity: AUDIT_ISSUE_TYPES[issue.issueType].severity,
-      detailsJson: issue.details ? JSON.stringify(issue.details) : null,
-    })),
-  );
-  await executeInBatches(issueRows, (tx, row) =>
-    tx.insert(auditIssues).values(row).onConflictDoNothing(),
-  );
 }
 
 async function insertLighthouseResults(
@@ -263,8 +237,8 @@ async function insertLighthouseResults(
       payloadSizeBytes: result.payloadSizeBytes ?? null,
     })),
   );
-  // Upsert: a step retry can charge a second DataForSEO call whose result
-  // must not be silently dropped in favor of a failed first attempt.
+  // The persistence step is retryable after its paid provider result has been
+  // checkpointed, so repeated writes must stay idempotent.
   await executeInBatches(rows, (tx, row) => {
     const { id: _id, auditId: _auditId, ...dataColumns } = row;
     return tx.insert(auditLighthouseResults).values(row).onConflictDoUpdate({
@@ -323,6 +297,22 @@ async function getPagesForAudit(auditId: string) {
     .where(eq(auditPages.auditId, auditId));
 }
 
+async function countPagesByFetchClass(
+  auditId: string,
+  fetchClass: PageFetchClass,
+): Promise<number> {
+  const rows = await db
+    .select({ pages: count() })
+    .from(auditPages)
+    .where(
+      and(
+        eq(auditPages.auditId, auditId),
+        eq(auditPages.fetchClass, fetchClass),
+      ),
+    );
+  return rows[0]?.pages ?? 0;
+}
+
 async function hasPagesForAudit(auditId: string): Promise<boolean> {
   const rows = await db
     .select({ id: auditPages.id })
@@ -342,15 +332,19 @@ async function getAuditsByProject(projectId: string) {
   return rows.map(({ audit }) => audit);
 }
 
-async function getAuditUsageForUser(userId: string) {
-  const rows = await db.query.audits.findMany({
-    where: eq(audits.startedByUserId, userId),
-    columns: {
-      status: true,
-      pagesTotal: true,
-      lighthouseTotal: true,
-    },
-  });
+// Org-scoped: the free-plan quota belongs to the org (the Autumn customer),
+// so usage must aggregate across every member — counting per starting user
+// would multiply the free ceiling by the member count.
+async function getAuditUsageForOrganization(organizationId: string) {
+  const rows = await db
+    .select({
+      status: audits.status,
+      pagesTotal: audits.pagesTotal,
+      lighthouseTotal: audits.lighthouseTotal,
+    })
+    .from(audits)
+    .innerJoin(projects, eq(audits.projectId, projects.id))
+    .where(eq(projects.organizationId, organizationId));
 
   return {
     capacityUnits: rows.reduce(
@@ -425,6 +419,7 @@ async function deleteAuditForProject(auditId: string, projectId: string) {
 
 export const AuditRepository = {
   createAudit,
+  updateAuditStart,
   updateAuditProgress,
   completeAudit,
   failAudit,
@@ -436,9 +431,10 @@ export const AuditRepository = {
   getLatestAuditForProject,
   getIssuesForAudit,
   getPagesForAudit,
+  countPagesByFetchClass,
   hasPagesForAudit,
   getAuditsByProject,
-  getAuditUsageForUser,
+  getAuditUsageForOrganization,
   getAuditResultsForProject,
   getLighthouseResultById,
   deleteAuditForProject,
